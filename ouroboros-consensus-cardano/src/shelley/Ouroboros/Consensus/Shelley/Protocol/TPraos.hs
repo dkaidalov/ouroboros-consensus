@@ -9,6 +9,7 @@ import qualified Cardano.Crypto.KES as SL
 import Cardano.Crypto.VRF (certifiedOutput)
 import Cardano.Ledger.BaseTypes (ProtVer (ProtVer))
 import Cardano.Ledger.Hashes (originalBytesSize)
+import Cardano.Ledger.Keys (hashKey)
 import Cardano.Protocol.TPraos.API (PraosCrypto)
 import qualified Cardano.Protocol.TPraos.API as SL
 import qualified Cardano.Protocol.TPraos.BlockHeader as SL
@@ -128,7 +129,7 @@ instance PraosCrypto c => ProtocolHeaderSupportsProtocol (TPraos c) where
   type CannotForgeError (TPraos c) = TPraosCannotForge c
 
   protocolHeaderView = id
-  pHeaderIssuer = SL.bheaderVk . SL.bhbody
+  pHeaderIssuer = hashKey . SL.bheaderVk . SL.bhbody
   pHeaderIssueNo = SL.ocertN . SL.bheaderOCert . SL.bhbody
 
   -- As this is the leader VRF value, which is used for slot election in the

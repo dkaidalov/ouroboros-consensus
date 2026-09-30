@@ -32,7 +32,7 @@ import Cardano.Ledger.Hashes
   , EraIndependentBlockHeader
   , HASH
   )
-import Cardano.Ledger.Keys (KeyRole (BlockIssuer), VKey)
+import Cardano.Ledger.Keys (KeyHash, KeyRole (BlockIssuer))
 import Cardano.Protocol.Crypto (Crypto, VRF)
 import Cardano.Protocol.TPraos.BlockHeader (PrevHash)
 import Cardano.Slotting.Block (BlockNo)
@@ -171,7 +171,7 @@ class ProtocolHeaderSupportsProtocol proto where
     ShelleyProtocolHeader proto -> ValidateView proto
 
   pHeaderIssuer ::
-    ShelleyProtocolHeader proto -> VKey BlockIssuer
+    ShelleyProtocolHeader proto -> KeyHash BlockIssuer
   pHeaderIssueNo ::
     ShelleyProtocolHeader proto -> Word64
 

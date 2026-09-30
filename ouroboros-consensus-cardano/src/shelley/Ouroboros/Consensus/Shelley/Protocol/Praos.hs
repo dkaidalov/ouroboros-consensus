@@ -6,12 +6,14 @@ module Ouroboros.Consensus.Shelley.Protocol.Praos () where
 
 import qualified Cardano.Crypto.KES as KES
 import Cardano.Crypto.VRF (certifiedOutput)
-import Cardano.Ledger.BaseTypes (ProtVer (ProtVer))
+import Cardano.Ledger.BaseTypes (ProtVer (ProtVer), StrictMaybe (..))
 import Cardano.Ledger.Chain (ChainChecksPParams (..))
+import Cardano.Ledger.Keys (hashKey)
 import Cardano.Ledger.Slot (SlotNo (unSlotNo))
 import Cardano.Protocol.Praos.BlockHeader
   ( Header (..)
   , HeaderBody (..)
+  , IssuerCert (..)
   , headerHash
   , headerSize
   )
@@ -76,24 +78,25 @@ instance PraosCrypto c => ProtocolHeaderSupportsEnvelope (Praos c) where
 
 instance PraosCrypto c => ProtocolHeaderSupportsKES (Praos c) where
   configSlotsPerKESPeriod cfg = praosSlotsPerKESPeriod $ praosParams cfg
+  -- A header without its certificate cannot be checked without the
+  -- chain-dependent state, which this stateless integrity check does not
+  -- have; such headers pass here and are fully validated by
+  -- 'updateChainDepState' instead.
   verifyHeaderIntegrity slotsPerKESPeriod header =
-    isRight $ KES.verifySignedKES () ocertVkHot t headerBody headerSig
+    case hbOCert headerBody of
+      SNothing -> True
+      SJust (IssuerCert _ SL.OCert{ocertVkHot, ocertKESPeriod = SL.KESPeriod startOfKesPeriod}) ->
+        let currentKesPeriod =
+              fromIntegral $
+                unSlotNo (hbSlotNo headerBody) `div` slotsPerKESPeriod
+            t
+              | currentKesPeriod >= startOfKesPeriod =
+                  currentKesPeriod - startOfKesPeriod
+              | otherwise =
+                  0
+         in isRight $ KES.verifySignedKES () ocertVkHot t headerBody headerSig
    where
     Header{headerBody, headerSig} = header
-    SL.OCert
-      { ocertVkHot
-      , ocertKESPeriod = SL.KESPeriod startOfKesPeriod
-      } = hbOCert headerBody
-
-    currentKesPeriod =
-      fromIntegral $
-        unSlotNo (hbSlotNo headerBody) `div` slotsPerKESPeriod
-
-    t
-      | currentKesPeriod >= startOfKesPeriod =
-          currentKesPeriod - startOfKesPeriod
-      | otherwise =
-          0
   mkHeader hk cbl il slotNo blockNo prevHash bbHash sz protVer = do
     PraosFields{praosSignature, praosToSign} <- forgePraosFields hk cbl il mkBhBodyBytes
     pure $ Header praosToSign praosSignature
@@ -104,17 +107,22 @@ instance PraosCrypto c => ProtocolHeaderSupportsKES (Praos c) where
         , praosToSignVrfVK
         , praosToSignVrfRes
         , praosToSignOCert
+        , praosToSignCarryOCert
         } =
         HeaderBody
           { hbBlockNo = blockNo
           , hbSlotNo = slotNo
           , hbPrev = prevHash
-          , hbVk = praosToSignIssuerVK
+          , hbIssuer = hashKey praosToSignIssuerVK
+          , hbIssueNo = SL.ocertN praosToSignOCert
           , hbVrfVk = praosToSignVrfVK
           , hbVrfRes = praosToSignVrfRes
           , hbBodySize = fromIntegral sz
           , hbBodyHash = bbHash
-          , hbOCert = praosToSignOCert
+          , hbOCert =
+              if praosToSignCarryOCert
+                then SJust (IssuerCert praosToSignIssuerVK praosToSignOCert)
+                else SNothing
           , hbProtVer = protVer
           }
 
@@ -123,7 +131,8 @@ instance PraosCrypto c => ProtocolHeaderSupportsProtocol (Praos c) where
   protocolHeaderView Header{headerBody, headerSig} =
     HeaderView
       { hvPrevHash = hbPrev headerBody
-      , hvVK = hbVk headerBody
+      , hvIssuer = hbIssuer headerBody
+      , hvIssueNo = hbIssueNo headerBody
       , hvVrfVK = hbVrfVk headerBody
       , hvVrfRes = hbVrfRes headerBody
       , hvOCert = hbOCert headerBody
@@ -131,8 +140,8 @@ instance PraosCrypto c => ProtocolHeaderSupportsProtocol (Praos c) where
       , hvSigned = headerBody
       , hvSignature = headerSig
       }
-  pHeaderIssuer = hbVk . headerBody
-  pHeaderIssueNo = SL.ocertN . hbOCert . headerBody
+  pHeaderIssuer = hbIssuer . headerBody
+  pHeaderIssueNo = hbIssueNo . headerBody
 
   -- This is the "unified" VRF value, prior to range extension which yields e.g.
   -- the leader VRF value used for slot election.

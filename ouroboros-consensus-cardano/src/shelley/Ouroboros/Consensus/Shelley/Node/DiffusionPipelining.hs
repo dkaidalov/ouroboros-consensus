@@ -89,7 +89,7 @@ instance
     ShelleyTentativeHeaderView
       (blockNo hdr)
       HotIdentity
-        { hiIssuer = SL.hashKey $ pHeaderIssuer sph
+        { hiIssuer = pHeaderIssuer sph
         , hiIssueNo = pHeaderIssueNo sph
         }
 

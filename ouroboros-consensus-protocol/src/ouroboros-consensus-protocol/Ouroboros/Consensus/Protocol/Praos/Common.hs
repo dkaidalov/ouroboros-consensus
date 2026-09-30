@@ -82,7 +82,7 @@ class HasMaxMajorProtVer proto where
 -- length.
 data PraosTiebreakerView c = PraosTiebreakerView
   { ptvSlotNo :: SlotNo
-  , ptvIssuer :: SL.VKey BlockIssuer
+  , ptvIssuer :: SL.KeyHash BlockIssuer
   , ptvIssueNo :: Word64
   , ptvTieBreakVRF :: VRF.OutputVRF (VRF c)
   }

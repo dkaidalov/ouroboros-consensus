@@ -10,31 +10,32 @@ module Ouroboros.Consensus.Protocol.Praos.Views
 
 import Cardano.Crypto.KES (SignedKES)
 import Cardano.Crypto.VRF (CertifiedVRF, VRFAlgorithm (VerKeyVRF))
-import Cardano.Ledger.BaseTypes (ProtVer)
+import Cardano.Ledger.BaseTypes (ProtVer, StrictMaybe)
 import Cardano.Ledger.Chain (ChainChecksPParams (..))
-import Cardano.Ledger.Keys (KeyRole (BlockIssuer), VKey)
+import Cardano.Ledger.Keys (KeyHash, KeyRole (BlockIssuer))
 import qualified Cardano.Ledger.Shelley.API as SL
 import Cardano.Protocol.Crypto (KES, VRF)
-import Cardano.Protocol.Praos.BlockHeader (HeaderBody)
+import Cardano.Protocol.Praos.BlockHeader (HeaderBody, IssuerCert)
 import Cardano.Protocol.Praos.VRF (InputVRF)
 import Cardano.Protocol.TPraos.BlockHeader (PrevHash)
-import Cardano.Protocol.TPraos.OCert (OCert)
 import Cardano.Slotting.Slot (SlotNo)
-import Data.Word (Word16, Word32)
+import Data.Word (Word16, Word32, Word64)
 import Lens.Micro ((^.))
 
 -- | View of the block header required by the Praos protocol.
 data HeaderView crypto = HeaderView
   { hvPrevHash :: !PrevHash
   -- ^ Hash of the previous block
-  , hvVK :: !(VKey BlockIssuer)
-  -- ^ verification key of block issuer
+  , hvIssuer :: !(KeyHash BlockIssuer)
+  -- ^ hash of the block issuer's cold verification key
+  , hvIssueNo :: !Word64
+  -- ^ counter of the operational certificate in force
   , hvVrfVK :: !(VerKeyVRF (VRF crypto))
   -- ^ VRF verification key for block issuer
   , hvVrfRes :: !(CertifiedVRF (VRF crypto) InputVRF)
   -- ^ VRF result
-  , hvOCert :: !(OCert crypto)
-  -- ^ operational certificate
+  , hvOCert :: !(StrictMaybe (IssuerCert crypto))
+  -- ^ cold key and operational certificate, when the header carries them
   , hvSlotNo :: !SlotNo
   -- ^ Slot
   , hvSigned :: !(HeaderBody crypto)

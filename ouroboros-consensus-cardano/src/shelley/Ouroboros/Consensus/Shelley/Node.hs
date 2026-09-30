@@ -80,19 +80,10 @@ instance ShelleyCompatible proto era => BlockSupportsMetrics (ShelleyBlock proto
   isSelfIssued cfg (ShelleyHeader shdr _) = case Map.size issuerVKeys of
     -- The most common case: a non-block producing node
     0 -> IsNotSelfIssued
-    -- A block producing node with a single set of credentials: just do an
-    -- equality check of the single VKey, skipping the more expensive
-    -- computation of the hash.
-    1
-      | pHeaderIssuer shdr `elem` issuerVKeys ->
-          IsSelfIssued
-      | otherwise ->
-          IsNotSelfIssued
-    -- When we are running with multiple sets of credentials, which should
-    -- only happen when benchmarking, do a hash lookup, as the number of
-    -- keys can grow to 100-250.
+    -- The header names its issuer by key hash, so this is a map lookup
+    -- whatever the number of credentials.
     _
-      | SL.hashKey (pHeaderIssuer shdr) `Map.member` issuerVKeys ->
+      | pHeaderIssuer shdr `Map.member` issuerVKeys ->
           IsSelfIssued
       | otherwise ->
           IsNotSelfIssued
