@@ -13,12 +13,10 @@ import Cardano.Ledger.Slot (SlotNo (unSlotNo))
 import Cardano.Protocol.Praos.BlockHeader
   ( Header (..)
   , HeaderBody (..)
-  , IssuerCert (..)
+  , HeaderOCert (..)
   , headerHash
   , headerSize
-  )
-import Cardano.Protocol.TPraos.OCert
-  ( OCert (ocertKESPeriod, ocertVkHot)
+  , mkHeaderOCert
   )
 import qualified Cardano.Protocol.TPraos.OCert as SL
 import Data.Either (isRight)
@@ -78,24 +76,15 @@ instance PraosCrypto c => ProtocolHeaderSupportsEnvelope (Praos c) where
 
 instance PraosCrypto c => ProtocolHeaderSupportsKES (Praos c) where
   configSlotsPerKESPeriod cfg = praosSlotsPerKESPeriod $ praosParams cfg
-  -- A header without its certificate cannot be checked without the
-  -- chain-dependent state, which this stateless integrity check does not
-  -- have; such headers pass here and are fully validated by
-  -- 'updateChainDepState' instead.
   verifyHeaderIntegrity slotsPerKESPeriod header =
-    case hbOCert headerBody of
-      SNothing -> True
-      SJust (IssuerCert _ SL.OCert{ocertVkHot, ocertKESPeriod = SL.KESPeriod startOfKesPeriod}) ->
-        let currentKesPeriod =
-              fromIntegral $
-                unSlotNo (hbSlotNo headerBody) `div` slotsPerKESPeriod
-            t
-              | currentKesPeriod >= startOfKesPeriod =
-                  currentKesPeriod - startOfKesPeriod
-              | otherwise =
-                  0
-         in isRight $ KES.verifySignedKES () ocertVkHot t headerBody headerSig
+    isRight $ KES.verifySignedKES () hocHotKey t headerBody headerSig
    where
+    HeaderOCert{hocHotKey, hocStartPeriod = SL.KESPeriod startOfKesPeriod} = hbOCert headerBody
+    currentKesPeriod =
+      fromIntegral $ unSlotNo (hbSlotNo headerBody) `div` slotsPerKESPeriod
+    t
+      | currentKesPeriod >= startOfKesPeriod = currentKesPeriod - startOfKesPeriod
+      | otherwise = 0
     Header{headerBody, headerSig} = header
   mkHeader hk cbl il slotNo blockNo prevHash bbHash sz protVer = do
     PraosFields{praosSignature, praosToSign} <- forgePraosFields hk cbl il mkBhBodyBytes
@@ -114,15 +103,13 @@ instance PraosCrypto c => ProtocolHeaderSupportsKES (Praos c) where
           , hbSlotNo = slotNo
           , hbPrev = prevHash
           , hbIssuer = hashKey praosToSignIssuerVK
-          , hbIssueNo = SL.ocertN praosToSignOCert
           , hbVrfVk = praosToSignVrfVK
           , hbVrfRes = praosToSignVrfRes
           , hbBodySize = fromIntegral sz
           , hbBodyHash = bbHash
           , hbOCert =
-              if praosToSignCarryOCert
-                then SJust (IssuerCert praosToSignIssuerVK praosToSignOCert)
-                else SNothing
+              let oc = mkHeaderOCert praosToSignIssuerVK praosToSignOCert
+               in if praosToSignCarryOCert then oc else oc{hocAuth = SNothing}
           , hbProtVer = protVer
           }
 
@@ -132,7 +119,6 @@ instance PraosCrypto c => ProtocolHeaderSupportsProtocol (Praos c) where
     HeaderView
       { hvPrevHash = hbPrev headerBody
       , hvIssuer = hbIssuer headerBody
-      , hvIssueNo = hbIssueNo headerBody
       , hvVrfVK = hbVrfVk headerBody
       , hvVrfRes = hbVrfRes headerBody
       , hvOCert = hbOCert headerBody
@@ -141,7 +127,7 @@ instance PraosCrypto c => ProtocolHeaderSupportsProtocol (Praos c) where
       , hvSignature = headerSig
       }
   pHeaderIssuer = hbIssuer . headerBody
-  pHeaderIssueNo = hbIssueNo . headerBody
+  pHeaderIssueNo = hocIssueNo . hbOCert . headerBody
 
   -- This is the "unified" VRF value, prior to range extension which yields e.g.
   -- the leader VRF value used for slot election.
@@ -151,6 +137,7 @@ instance PraosCrypto c => ProtocolHeaderSupportsProtocol (Praos c) where
   pTieBreakVRFValue = certifiedOutput . hbVrfRes . headerBody
 
 type instance Signed (Header c) = HeaderBody c
+
 instance PraosCrypto c => SignedHeader (Header c) where
   headerSigned = headerBody
 

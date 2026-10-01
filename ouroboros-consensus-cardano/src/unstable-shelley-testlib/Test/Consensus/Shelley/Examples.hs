@@ -23,6 +23,7 @@ module Test.Consensus.Shelley.Examples
 import qualified Cardano.Ledger.BaseTypes as SL
 import qualified Cardano.Ledger.Block as SL
 import Cardano.Ledger.Core
+import Cardano.Ledger.Keys (hashKey)
 import qualified Cardano.Ledger.Shelley.API as SL
 import Cardano.Protocol.Crypto (StandardCrypto)
 import Cardano.Protocol.Praos.BlockHeader
@@ -244,12 +245,12 @@ fromShelleyLedgerExamplesPraos
           { hbBlockNo = SL.bheaderBlockNo bhBody
           , hbSlotNo = SL.bheaderSlotNo bhBody
           , hbPrev = SL.bheaderPrev bhBody
-          , hbVk = SL.bheaderVk bhBody
+          , hbIssuer = hashKey (SL.bheaderVk bhBody)
           , hbVrfVk = SL.bheaderVrfVk bhBody
           , hbVrfRes = coerce $ SL.bheaderEta bhBody
           , hbBodySize = SL.bsize bhBody
           , hbBodyHash = SL.bhash bhBody
-          , hbOCert = SL.bheaderOCert bhBody
+          , hbOCert = Praos.mkHeaderOCert (SL.bheaderVk bhBody) (SL.bheaderOCert bhBody)
           , hbProtVer = SL.bprotver bhBody
           }
       hSig = coerce bhSig

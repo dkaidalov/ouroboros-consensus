@@ -101,5 +101,12 @@ validate context MutatedHeader{header, mutation} =
   hashVRFKey = hashVerKeyVRF @StandardCrypto $ deriveVerKeyVRF vrfSignKey
 
   headerView = validateView @ConwayBlock undefined (mkShelleyHeader header)
-  validateKES = doValidateKESSignature praosMaxKESEvo praosSlotsPerKESPeriod poolDistr ocertCounters headerView
+  validateKES =
+    doValidateKESSignature
+      praosMaxKESEvo
+      praosSlotsPerKESPeriod
+      poolDistr
+      ocertCounters
+      Map.empty
+      headerView
   validateVRF = doValidateVRFSignature nonce poolDistr activeSlotCoeff headerView

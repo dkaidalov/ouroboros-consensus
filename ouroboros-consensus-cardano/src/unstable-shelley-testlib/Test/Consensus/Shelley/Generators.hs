@@ -10,6 +10,7 @@
 module Test.Consensus.Shelley.Generators (SomeResult (..)) where
 
 import Cardano.Ledger.Core (TranslationContext)
+import Cardano.Ledger.Keys (hashKey)
 import qualified Cardano.Ledger.Shelley.API as SL
 import Cardano.Ledger.State (InstantStake)
 import Cardano.Protocol.Crypto (Crypto)
@@ -124,12 +125,12 @@ instance
           { Praos.hbBlockNo = SL.bheaderBlockNo bhBody
           , Praos.hbSlotNo = SL.bheaderSlotNo bhBody
           , Praos.hbPrev = SL.bheaderPrev bhBody
-          , Praos.hbVk = SL.bheaderVk bhBody
+          , Praos.hbIssuer = hashKey (SL.bheaderVk bhBody)
           , Praos.hbVrfVk = SL.bheaderVrfVk bhBody
           , Praos.hbVrfRes = coerce $ SL.bheaderEta bhBody
           , Praos.hbBodySize = SL.bsize bhBody
           , Praos.hbBodyHash = SL.bhash bhBody
-          , Praos.hbOCert = SL.bheaderOCert bhBody
+          , Praos.hbOCert = Praos.mkHeaderOCert (SL.bheaderVk bhBody) (SL.bheaderOCert bhBody)
           , Praos.hbProtVer = SL.bprotver bhBody
           }
       hSig = coerce bhSig

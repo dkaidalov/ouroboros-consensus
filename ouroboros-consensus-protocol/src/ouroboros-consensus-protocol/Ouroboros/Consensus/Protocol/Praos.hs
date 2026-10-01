@@ -32,7 +32,7 @@ module Ouroboros.Consensus.Protocol.Praos
   ) where
 
 import Cardano.Binary (FromCBOR (..), ToCBOR (..), enforceSize)
-import Cardano.Binary.FixedSizeCodec (rawDecodeFixedSized, rawEncodeFixedSized)
+import Cardano.Binary.FixedSizeCodec (rawEncodeFixedSized)
 import qualified Cardano.Crypto.DSIGN as DSIGN
 import qualified Cardano.Crypto.Hash as Hash
 import qualified Cardano.Crypto.KES as KES
@@ -54,7 +54,7 @@ import Cardano.Ledger.Shelley (ShelleyEra)
 import Cardano.Ledger.Slot (Duration (Duration), (+*))
 import qualified Cardano.Ledger.State as SL
 import Cardano.Protocol.Crypto (Crypto, KES, StandardCrypto, VRF)
-import Cardano.Protocol.Praos.BlockHeader (HeaderBody, IssuerCert (..))
+import Cardano.Protocol.Praos.BlockHeader (HeaderBody, HeaderOCert (..), OCertAuth (..))
 import Cardano.Protocol.Praos.VRF
   ( InputVRF
   , mkInputVRF
@@ -70,7 +70,7 @@ import Cardano.Protocol.TPraos.BlockHeader
 import Cardano.Protocol.TPraos.OCert
   ( KESPeriod (KESPeriod)
   , OCert (OCert)
-  , OCertSignable
+  , OCertSignable (..)
   )
 import qualified Cardano.Protocol.TPraos.OCert as OCert
 import qualified Cardano.Protocol.TPraos.Rules.Prtcl as SL
@@ -165,11 +165,10 @@ data PraosToSign c = PraosToSign
   -- ^ Lightweight delegation certificate mapping the cold (DSIGN) key to
   -- the online KES key.
   , praosToSignCarryOCert :: Bool
-  -- ^ Whether the header must carry the cold key and the certificate: true
+  -- ^ Whether the header must carry the cold key and certificate signature: true
   -- when the chain-dependent state does not yet hold this certificate for
   -- this issuer (first block after a KES rotation, or the issuer's first
-  -- block ever). Otherwise the header carries only the issuer's key hash
-  -- and the certificate counter.
+  -- block ever). The hot key, counter and start period are always carried.
   }
   deriving Generic
 
@@ -247,7 +246,7 @@ data PraosIsLeader c = PraosIsLeader
   { praosIsLeaderVrfRes :: VRF.CertifiedVRF (VRF c) InputVRF
   , praosIsLeaderKnownOCert :: Maybe StoredOCert
   -- ^ The operational certificate the chain-dependent state holds for us,
-  -- if any, so that the forged header carries the full certificate only
+  -- if any, so that the forged header carries cold-key authentication only
   -- when the chain does not know it yet.
   }
   deriving Generic
@@ -281,9 +280,10 @@ instance HasMaxMajorProtVer (Praos c) where
 -- as a series of nonces which get updated in different ways over the course of
 -- an epoch.
 -- | An operational certificate as remembered per block issuer, so that
--- headers can leave the certificate out once the chain has seen it. Kept
+-- headers can omit cold-key authentication once the chain has seen it. Kept
 -- crypto-independent (the hot KES verification key as its serialisation) so
--- that 'PraosState' needs no type parameter; the key is decoded again on use.
+-- that 'PraosState' needs no type parameter; validation compares these bytes
+-- with the hot key carried in the header.
 data StoredOCert = StoredOCert
   { soVkHot :: !ByteString
   -- ^ 'rawEncodeFixedSized' of the hot KES verification key
@@ -306,6 +306,10 @@ instance FromCBOR StoredOCert where
 
 storeOCert :: Crypto c => OCert.OCert c -> StoredOCert
 storeOCert (OCert vkHot n (KESPeriod c0) _) =
+  StoredOCert (rawEncodeFixedSized vkHot) n (fromIntegral c0)
+
+storeHeaderOCert :: Crypto c => HeaderOCert c -> StoredOCert
+storeHeaderOCert (HeaderOCert vkHot n (KESPeriod c0) _) =
   StoredOCert (rawEncodeFixedSized vkHot) n (fromIntegral c0)
 
 data PraosState = PraosState
@@ -371,8 +375,9 @@ instance Serialise PraosState where
       [(0, Decode decodePraosState0), (1, Decode decodePraosState1)]
    where
     -- Version 0 predates the per-issuer certificate map; a state decoded
-    -- from it starts with no known certificates, so the next header of
-    -- every issuer must carry one.
+    -- from it starts with no known certificates. Such a state needs a
+    -- transition that introduces cold-key authentication for every issuer
+    -- before accepting headers that omit it.
     decodePraosState0 = do
       enforceSize "PraosState" 8
       PraosState
@@ -442,8 +447,8 @@ data PraosValidationErr c
       !String -- error message given by Consensus Layer
   | NoCounterForKeyHashOCERT
       !(KeyHash SL.BlockIssuer) -- stake pool key hash
-  | -- | The header carries no operational certificate and the chain holds
-    -- none for this issuer
+  | -- | The header omits cold-key authentication and the chain holds
+    -- no authenticated certificate for this issuer
     NoOCertForIssuerOCERT
       !(KeyHash SL.BlockIssuer)
   | -- | The cold key carried with the certificate does not hash to the
@@ -451,14 +456,13 @@ data PraosValidationErr c
     IssuerKeyMismatchOCERT
       !(KeyHash SL.BlockIssuer) -- issuer in the header
       !(KeyHash SL.BlockIssuer) -- hash of the carried cold key
-  | -- | The header's certificate counter differs from the certificate's
-    -- (carried or remembered)
+  | -- | The header's certificate counter differs from the remembered counter
     IssueNoMismatchOCERT
       !Word64 -- header
       !Word64 -- certificate
-  | -- | The remembered hot key bytes do not decode; cannot happen for a
-    -- state built by this code
-    CorruptStoredOCert
+  | -- | The header hot key or start period differs from the authenticated
+    -- certificate remembered for this issuer
+    StoredOCertMismatch
       !(KeyHash SL.BlockIssuer)
   deriving Generic
 
@@ -595,10 +599,10 @@ instance PraosCrypto c => ConsensusProtocol (Praos c) where
               then newEvolvingNonce
               else praosStateCandidateNonce cs
         , praosStateOCertCounters =
-            Map.insert hk (Views.hvIssueNo b) $ praosStateOCertCounters cs
+            Map.insert hk (hocIssueNo $ Views.hvOCert b) $ praosStateOCertCounters cs
         , praosStateOCerts =
-            case Views.hvOCert b of
-              SJust (IssuerCert _ oc) -> Map.insert hk (storeOCert oc) $ praosStateOCerts cs
+            case hocAuth (Views.hvOCert b) of
+              SJust _ -> Map.insert hk (storeHeaderOCert $ Views.hvOCert b) $ praosStateOCerts cs
               SNothing -> praosStateOCerts cs
         }
      where
@@ -703,12 +707,10 @@ validateKESSignature
 
 -- | Validate the KES signature and the operational certificate of a header.
 --
--- A header either carries its issuer's cold key and operational certificate
--- ('IssuerCert'), in which case the certificate is checked as it always was
--- (cold signature, counter against the remembered counter, KES period) and
--- becomes the issuer's remembered certificate, or it carries neither and the
--- remembered certificate is used to verify the KES signature. In both cases
--- the header's own counter must match the certificate's.
+-- Every header carries the hot key, counter and start period. When cold-key
+-- authentication is present we verify it; otherwise all three fields must
+-- match the authenticated certificate remembered on this chain. The KES
+-- lifetime and header signature are checked in both cases.
 doValidateKESSignature ::
   forall c.
   PraosCrypto c =>
@@ -720,46 +722,40 @@ doValidateKESSignature ::
   Views.HeaderView c ->
   Except (PraosValidationErr c) ()
 doValidateKESSignature praosMaxKESEvo praosSlotsPerKESPeriod stakeDistribution ocertCounters ocerts b =
-  case Views.hvOCert b of
-    SJust (IssuerCert vkcold'@(VKey vkcold) oc@(OCert vk_hot n c0 tau)) -> do
-      hashKey vkcold' == hk ?! IssuerKeyMismatchOCERT hk (hashKey vkcold')
-      n == hvN ?! IssueNoMismatchOCERT hvN n
-      checkPeriods c0
-      DSIGN.verifySignedDSIGN () vkcold (OCert.ocertToSignable oc) tau
-        ?!: InvalidSignatureOCERT n c0
-      verifyKes vk_hot c0
-      case currentIssueNo of
-        Nothing -> do
-          throwError $ NoCounterForKeyHashOCERT hk
-        Just m -> do
-          m <= n ?! CounterTooSmallOCERT m n
-          n <= m + 1 ?! CounterOverIncrementedOCERT m n
-    SNothing -> do
-      StoredOCert vkHotBytes n c0_ <- case Map.lookup hk ocerts of
-        Nothing -> throwError $ NoOCertForIssuerOCERT hk
-        Just so -> pure so
-      n == hvN ?! IssueNoMismatchOCERT hvN n
-      vk_hot <- case rawDecodeFixedSized vkHotBytes of
-        Nothing -> throwError $ CorruptStoredOCert hk
-        Just vk -> pure vk
-      let c0 = KESPeriod (fromIntegral c0_)
-      checkPeriods c0
-      verifyKes vk_hot c0
+  do
+    checkPeriods c0
+    case hocAuth oc of
+      SJust (OCertAuth vkcold'@(VKey vkcold) tau) -> do
+        hashKey vkcold' == hk ?! IssuerKeyMismatchOCERT hk (hashKey vkcold')
+        DSIGN.verifySignedDSIGN () vkcold (OCertSignable vk_hot n c0) tau
+          ?!: InvalidSignatureOCERT n c0
+        case currentIssueNo of
+          Nothing -> throwError $ NoCounterForKeyHashOCERT hk
+          Just m -> do
+            m <= n ?! CounterTooSmallOCERT m n
+            n <= m + 1 ?! CounterOverIncrementedOCERT m n
+      SNothing -> do
+        remembered <- case Map.lookup hk ocerts of
+          Nothing -> throwError $ NoOCertForIssuerOCERT hk
+          Just so -> pure so
+        n == soCounter remembered ?! IssueNoMismatchOCERT n (soCounter remembered)
+        storeHeaderOCert oc == remembered ?! StoredOCertMismatch hk
+    verifyKes vk_hot c0
  where
   hk = Views.hvIssuer b
-  hvN = Views.hvIssueNo b
+  oc@(HeaderOCert vk_hot n c0 _) = Views.hvOCert b
   SlotNo s = Views.hvSlotNo b
   kp@(KESPeriod kp_) =
     if praosSlotsPerKESPeriod == 0
       then error "kesPeriod: slots per KES period was set to zero"
       else KESPeriod . fromIntegral $ s `div` praosSlotsPerKESPeriod
-  checkPeriods c0@(KESPeriod c0_) = do
-    c0 <= kp ?! KESBeforeStartOCERT c0 kp
-    kp_ < c0_ + fromIntegral praosMaxKESEvo ?! KESAfterEndOCERT kp c0 praosMaxKESEvo
+  checkPeriods start@(KESPeriod start_) = do
+    start <= kp ?! KESBeforeStartOCERT start kp
+    kp_ < start_ + fromIntegral praosMaxKESEvo ?! KESAfterEndOCERT kp start praosMaxKESEvo
   verifyKes :: KES.VerKeyKES (KES c) -> KESPeriod -> Except (PraosValidationErr c) ()
-  verifyKes vk_hot (KESPeriod c0_) = do
+  verifyKes hotKey (KESPeriod c0_) = do
     let t = if kp_ >= c0_ then kp_ - c0_ else 0
-    KES.verifySignedKES () vk_hot t (Views.hvSigned b) (Views.hvSignature b)
+    KES.verifySignedKES () hotKey t (Views.hvSigned b) (Views.hvSignature b)
       ?!: InvalidKesSignatureOCERT kp_ c0_ t praosMaxKESEvo
   currentIssueNo :: Maybe Word64
   currentIssueNo

@@ -6,15 +6,17 @@ module Test.Consensus.Protocol.Serialisation.Generators () where
 
 import Cardano.Crypto.KES (unsoundPureSignedKES)
 import Cardano.Crypto.VRF (evalCertified)
+import Cardano.Ledger.BaseTypes (StrictMaybe (..))
 import Cardano.Protocol.Praos.BlockHeader
   ( Header (Header)
   , HeaderBody (HeaderBody)
+  , HeaderOCert (HeaderOCert)
+  , OCertAuth (OCertAuth)
   )
 import Cardano.Protocol.Praos.VRF (InputVRF, mkInputVRF)
 import Cardano.Protocol.TPraos.BlockHeader (HashHeader, PrevHash (..))
 import Cardano.Protocol.TPraos.OCert
   ( KESPeriod (KESPeriod)
-  , OCert (OCert)
   )
 import Cardano.Slotting.Block (BlockNo (BlockNo))
 import Cardano.Slotting.Slot
@@ -33,11 +35,11 @@ instance Arbitrary InputVRF where
 instance Praos.PraosCrypto c => Arbitrary (HeaderBody c) where
   arbitrary =
     let ocert =
-          OCert
+          HeaderOCert
             <$> arbitrary
             <*> arbitrary
             <*> (KESPeriod <$> arbitrary)
-            <*> arbitrary
+            <*> oneof [pure SNothing, SJust <$> (OCertAuth <$> arbitrary <*> arbitrary)]
 
         certVrf =
           evalCertified ()
@@ -74,6 +76,7 @@ instance Arbitrary PraosState where
         , At <$> (SlotNo <$> choose (1, 10))
         ]
       <*> arbitrary
+      <*> pure mempty -- Certificate-map round trips are covered by pq-header-checks.
       <*> arbitrary
       <*> arbitrary
       <*> arbitrary

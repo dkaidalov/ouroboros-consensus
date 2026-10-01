@@ -26,7 +26,6 @@ import Cardano.Binary.FixedSizeCodec
   )
 import Cardano.Crypto.DSIGN
   ( DSIGNAlgorithm (SignKeyDSIGN, genKeyDSIGN)
-  , Ed25519DSIGN
   , deriveVerKeyDSIGN
   )
 import Cardano.Crypto.Hash
@@ -43,13 +42,14 @@ import Cardano.Crypto.VRF
   , hashVerKeyVRF
   )
 import qualified Cardano.Crypto.VRF as VRF
+import Cardano.Crypto.VRF.Padded (SignKeyVRF (..))
 import Cardano.Crypto.VRF.Praos (skToBatchCompat)
-import qualified Cardano.Crypto.VRF.Praos as VRF
 import Cardano.Ledger.BaseTypes
   ( ActiveSlotCoeff
   , Nonce (..)
   , PositiveUnitInterval
   , ProtVer (..)
+  , StrictMaybe (..)
   , Version
   , activeSlotVal
   , boundRational
@@ -63,15 +63,20 @@ import Cardano.Ledger.Binary
   , serialize'
   )
 import Cardano.Ledger.Keys
-  ( KeyHash
+  ( DSIGN
+  , KeyHash
   , KeyRole (BlockIssuer)
   , VKey (..)
   , hashKey
   , signedDSIGN
   )
+import Cardano.Protocol.Crypto (KES, VRF)
 import Cardano.Protocol.Praos.BlockHeader
   ( Header
   , HeaderBody (..)
+  , HeaderOCert (..)
+  , OCertAuth (..)
+  , mkHeaderOCert
   , pattern Header
   )
 import Cardano.Protocol.Praos.VRF
@@ -164,45 +169,48 @@ mutate context header mutation =
       MutateKESKey -> do
         let Header body _ = header
         newKESSignKey <- newKESSigningKey <$> gen32Bytes
-        KESPeriod kesPeriod <- genValidKESPeriod (hbSlotNo body) praosSlotsPerKESPeriod
-        let sig' = KES.unsoundPureSignKES () kesPeriod body newKESSignKey
+        let sig' = KES.unsoundPureSignKES () 0 body newKESSignKey
         pure (context, Header body (KES.SignedKES sig'))
       MutateColdKey -> do
         let Header body _ = header
         newColdSignKey <- genKeyDSIGN . mkSeedFromBytes <$> gen32Bytes
-        (hbOCert, KESPeriod kesPeriod) <- genCert (hbSlotNo body) context{coldSignKey = newColdSignKey}
-        let newBody = body{hbOCert}
-        let sig' = KES.unsoundPureSignKES () kesPeriod newBody kesSignKey
+        (badCert, _) <- genCert (hbSlotNo body) context{coldSignKey = newColdSignKey}
+        let hbOCert = mkHeaderOCert (VKey $ deriveVerKeyDSIGN coldSignKey) badCert
+            newBody = body{hbOCert}
+        let sig' = KES.unsoundPureSignKES () 0 newBody kesSignKey
         pure (context, Header newBody (KES.SignedKES sig'))
       MutateKESPeriod -> do
         let Header body _ = header
         KESPeriod kesPeriod' <- genKESPeriodAfterLimit (hbSlotNo body) praosSlotsPerKESPeriod
         let newKESPeriod = KESPeriod kesPeriod'
-        let oldOCert@OCert{ocertVkHot, ocertN} = hbOCert body
+        let oldOCert@HeaderOCert{hocHotKey, hocIssueNo} = hbOCert body
         let newBody =
               body
                 { hbOCert =
                     oldOCert
-                      { ocertKESPeriod = newKESPeriod
-                      , ocertSigma = signedDSIGN coldSignKey $ OCertSignable ocertVkHot ocertN newKESPeriod
+                      { hocStartPeriod = newKESPeriod
+                      , hocAuth =
+                          SJust $
+                            OCertAuth (VKey $ deriveVerKeyDSIGN coldSignKey) $
+                              signedDSIGN coldSignKey $
+                                OCertSignable hocHotKey hocIssueNo newKESPeriod
                       }
                 }
-        let sig' = KES.unsoundPureSignKES () kesPeriod' newBody kesSignKey
+        let sig' = KES.unsoundPureSignKES () 0 newBody kesSignKey
         pure (context, Header newBody (KES.SignedKES sig'))
       MutateKESPeriodBefore -> do
         let Header body _ = header
-            OCert{ocertKESPeriod = KESPeriod kesPeriod} = hbOCert body
+            HeaderOCert{hocStartPeriod = KESPeriod kesPeriod} = hbOCert body
         newSlotNo <- genSlotAfterKESPeriod (fromIntegral kesPeriod) praosMaxKESEvo praosSlotsPerKESPeriod
         let rho' = mkInputVRF newSlotNo nonce
-            period' = unSlotNo newSlotNo `div` praosSlotsPerKESPeriod
             hbVrfRes = VRF.evalCertified () rho' vrfSignKey
             newBody = body{hbSlotNo = newSlotNo, hbVrfRes}
-            sig' = KES.unsoundPureSignKES () (fromIntegral period' - kesPeriod) newBody kesSignKey
+            sig' = KES.unsoundPureSignKES () 0 newBody kesSignKey
         pure (context, Header newBody (KES.SignedKES sig'))
       MutateCounterOver1 -> do
         let poolId = coerce $ hashKey $ VKey $ deriveVerKeyDSIGN coldSignKey
             Header body _ = header
-            OCert{ocertN} = hbOCert body
+            HeaderOCert{hocIssueNo = ocertN} = hbOCert body
         newCounter <- choose (0, ocertN - 2)
         let context' = context{ocertCounters = Map.insert poolId newCounter (ocertCounters context)}
         pure (context', header)
@@ -272,7 +280,7 @@ genMutation header =
       <> maybeCounterOver1
  where
   Header body _ = header
-  OCert{ocertN} = hbOCert body
+  HeaderOCert{hocIssueNo = ocertN} = hbOCert body
   maybeCounterOver1 =
     if ocertN > 10
       then [(1, pure MutateCounterOver1)]
@@ -307,10 +315,13 @@ instance Json.FromJSON MutatedHeader where
           LBS.fromStrict headerBytes
 
 -- * Generators
-type KESKey = KES.UnsoundPureSignKeyKES (KES.Sum6KES Ed25519DSIGN Blake2b_256)
+type KESKey = KES.UnsoundPureSignKeyKES (KES StandardCrypto)
 
-newVRFSigningKey :: ByteString -> (VRF.SignKeyVRF VRF.PraosVRF, VRF.VerKeyVRF VRF.PraosVRF)
-newVRFSigningKey = VRF.genKeyPairVRF . mkSeedFromBytes
+newVRFSigningKey ::
+  ByteString -> (VRF.SignKeyVRF (VRF StandardCrypto), VRF.VerKeyVRF (VRF StandardCrypto))
+newVRFSigningKey bytes =
+  let sk = VRF.genKeyVRF (mkSeedFromBytes bytes)
+   in (sk, deriveVerKeyVRF sk)
 
 newKESSigningKey :: ByteString -> KESKey
 newKESSigningKey = KES.unsoundPureGenKeyKES . mkSeedFromBytes
@@ -319,8 +330,8 @@ data GeneratorContext = GeneratorContext
   { praosSlotsPerKESPeriod :: !Word64
   , praosMaxKESEvo :: !Word64
   , kesSignKey :: !KESKey
-  , coldSignKey :: !(SignKeyDSIGN Ed25519DSIGN)
-  , vrfSignKey :: !(VRF.SignKeyVRF VRF.PraosVRF)
+  , coldSignKey :: !(SignKeyDSIGN DSIGN)
+  , vrfSignKey :: !(VRF.SignKeyVRF (VRF StandardCrypto))
   , nonce :: !Nonce
   , ocertCounters :: !(Map.Map (KeyHash BlockIssuer) Word64)
   , activeSlotCoeff :: !ActiveSlotCoeff
@@ -353,7 +364,7 @@ instance Json.ToJSON GeneratorContext where
    where
     rawKesSignKey = decodeUtf8 . Base16.encode $ rawEncodeFixedSized kesSignKey
     rawColdSignKey = decodeUtf8 . Base16.encode $ rawEncodeFixedSized coldSignKey
-    rawVrfSignKey = decodeUtf8 . Base16.encode $ rawEncodeFixedSized $ skToBatchCompat vrfSignKey
+    rawVrfSignKey = decodeUtf8 . Base16.encode $ rawEncodeFixedSized $ case vrfSignKey of SignKeyPaddedVRF sk -> skToBatchCompat sk
     rawVrVKeyHash =
       decodeUtf8 . Base16.encode $
         hashToBytes $
@@ -442,18 +453,22 @@ genHeaderBody context = do
   hbBlockNo <- BlockNo <$> arbitrary
   (hbSlotNo, hbVrfRes, hbVrfVk) <- genLeadingSlot context
   hbPrev <- BlockHash . HashHeader <$> genHash
-  let hbVk = VKey $ deriveVerKeyDSIGN coldSignKey
+  let coldKey = VKey $ deriveVerKeyDSIGN coldSignKey
+      hbIssuer = hashKey coldKey
   hbBodySize <- choose (1000, 90000)
   hbBodyHash <- genHash
-  (hbOCert, kesPeriod) <- genCert hbSlotNo context
-  let hbProtVer = protocolVersionZero
+  (ocert, _) <- genCert hbSlotNo context
+  let hbOCert = mkHeaderOCert coldKey ocert
+      hbProtVer = protocolVersionZero
       headerBody = HeaderBody{..}
-  pure $ (headerBody, kesPeriod)
+  -- The fresh hot key signs at relative period zero.
+  pure $ (headerBody, KESPeriod 0)
  where
   GeneratorContext{coldSignKey} = context
 
 genLeadingSlot ::
-  GeneratorContext -> Gen (SlotNo, VRF.CertifiedVRF VRF.PraosVRF InputVRF, VRF.VerKeyVRF VRF.PraosVRF)
+  GeneratorContext ->
+  Gen (SlotNo, VRF.CertifiedVRF (VRF StandardCrypto) InputVRF, VRF.VerKeyVRF (VRF StandardCrypto))
 genLeadingSlot context = do
   slotNo <- SlotNo . getPositive <$> arbitrary `suchThat` isLeader
   let rho' = mkInputVRF slotNo nonce
